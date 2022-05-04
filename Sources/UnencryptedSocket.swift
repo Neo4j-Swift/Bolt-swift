@@ -94,7 +94,7 @@ public class UnencryptedSocket {
 
         self.bootstrap = bootstrap
         // print("#1")
-        bootstrap.connectTimeout(TimeAmount.milliseconds(Int64(timeout)))
+        _ = bootstrap.connectTimeout(TimeAmount.milliseconds(Int64(timeout)))
         bootstrap.connect(host: hostname, port: port).map{ theChannel -> Void in
             self.channel = theChannel
         }.whenComplete { (result) in
@@ -139,8 +139,8 @@ extension UnencryptedSocket: SocketProtocol {
         var buffer = channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
         
-        let c = cnt
-        cnt = cnt + 1
+        // let c = cnt
+        // cnt = cnt + 1
         
         // print("\nSend #\(c)")
         // print(Data(bytes: bytes, count: bytes.count).hexEncodedString())

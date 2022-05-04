@@ -110,7 +110,8 @@ extension NIOTSConnectionBootstrap {
             // only available starting with macOS 10.15 & iOS 13
             // let serverName = sec_protocol_metadata_get_server_name(metadata)
 
-            SecTrustEvaluateAsync(actualTrust, verifyQueue) { (trust, result) in
+            SecTrustEvaluateAsyncWithError(actualTrust, verifyQueue) { (trust, result, error) -> Void in
+            // SecTrustEvaluateAsync(actualTrust, verifyQueue) { (trust, result, error) in
 
                 var optionalSha1: String?
                 let count = SecTrustGetCertificateCount(trust)
@@ -132,11 +133,13 @@ extension NIOTSConnectionBootstrap {
                     return
                 }
 
-                switch result {
-                case .proceed, .unspecified:
+                // switch result {
+                // case .proceed, .unspecified:@
+                if result {
                     validator.didTrustCertificate(withSHA1: sha1)
                     verifyCompleteCB(true)
-                default:
+                // default:
+                } else {
                     if(!validator.shouldTrustCertificate(withSHA1: sha1)) {
                         verifyCompleteCB(false)
                     } else {

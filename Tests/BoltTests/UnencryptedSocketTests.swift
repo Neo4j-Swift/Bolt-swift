@@ -54,9 +54,9 @@ class UnencryptedSocketTests: XCTestCase {
         socketTests?.templateUnwind(self)
     }
 
-    func testUnwindWithToNodes() throws {
+    func testUnwindWithToNodes() {
         XCTAssertNotNil(socketTests)
-        try socketTests?.templateUnwindWithToNodes(self)
+        socketTests?.templateUnwindWithToNodes(self)
     }
 
 }

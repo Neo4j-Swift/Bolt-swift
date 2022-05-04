@@ -58,7 +58,7 @@ extension SocketTests {
         
         let statements = [ stmt1, stmt2, stmt3, stmt4, stmt5, stmt6, stmt7, stmt8, stmt9, stmt10, stmt11 ]
 
-        try performAsLoggedIn { (conn, dispatchGroup) in
+        try performAsLoggedIn { (conn) in
 
             self.perform(conn: conn, exp: exp, statements: statements)
             
@@ -79,16 +79,16 @@ extension SocketTests {
 
         let request = Request.run(statement: statement, parameters: Map(dictionary: [:]))
         
-        let promise =  try? conn.request(request)
-        promise?.whenSuccess{ responses in
+        let promise =  conn.request(request)
+        promise.whenSuccess{ responses in
 
             if responses.count == 0 {
                 XCTFail("Unexpected response for \(statement)")
             }
 
             let request = Request.pullAll()
-            let pullPromise = try? conn.request(request)
-            pullPromise?.whenSuccess { responses in
+            let pullPromise = conn.request(request)
+            pullPromise.whenSuccess { responses in
 
                 if responses.count == 0 {
                     XCTFail("Unexpected response")
@@ -102,7 +102,7 @@ extension SocketTests {
             }
         }
         
-        promise?.whenFailure({ (error) in
+        promise.whenFailure({ (error) in
             if let responseError = error as? Response.ResponseError {
                 switch responseError {
                 case let Response.ResponseError.forbiddenDueToTransactionType(message):
@@ -117,22 +117,26 @@ extension SocketTests {
         })
     }
 
-    func performAsLoggedIn(block: @escaping (Connection, DispatchGroup) throws -> Void) throws {
+    func performAsLoggedIn(block: @escaping (Connection) throws -> Void) throws {
 
         let conn = Connection(socket: socket, settings: settings)
 
-        let dispatchGroup = DispatchGroup()
-        dispatchGroup.enter()
-        try conn.connect { success in
-            defer {
-                dispatchGroup.leave()
+        do {
+            try conn.connect { (error) in
+                if let error = error {
+                    print("Unknown error while connecting: \(error.localizedDescription)")
+                    XCTFail()
+                } else {
+                    try block(conn)
+                }
             }
-
-            XCTAssertTrue(success != nil, "Must be logged in successfully")
-
-            try block(conn, dispatchGroup)
+        } catch let error as Connection.ConnectionError {
+            print("Connection error while connecting: \(error.localizedDescription)")
+            XCTFail()
+        } catch let error {
+            print("Unknown error while connecting: \(error.localizedDescription)")
+            XCTFail()
         }
-        dispatchGroup.wait()
     }
     
     func templateMichaels100kCannotFitInATransaction(_ testcase: XCTestCase) throws {
@@ -145,7 +149,7 @@ extension SocketTests {
 
         let exp = testcase.expectation(description: "Test successful")
 
-        try performAsLoggedIn { (conn, dispatchGroup) in
+        try performAsLoggedIn { (conn) in
 
             self.perform(conn: conn, exp: exp, statements: statements)
             
@@ -204,15 +208,15 @@ extension SocketTests {
         
         let exp = testcase.expectation(description: "Test successful")
 
-        try performAsLoggedIn { (conn, dispatchGroup) in
+        try performAsLoggedIn { (conn) in
 
             let request = Request.run(statement: stmt, parameters: Map(dictionary: [:]))
-            let promise = try? conn.request(request)
-            promise?.whenSuccess{ _ in
+            let promise = conn.request(request)
+            promise.whenSuccess{ _ in
                 XCTFail("Unexpected response")
                 exp.fulfill()
             }
-            promise?.whenFailure { _ in
+            promise.whenFailure { _ in
                 // Happy path
                 exp.fulfill()
             }
@@ -230,15 +234,15 @@ extension SocketTests {
         
         let stmt = "UNWIND RANGE(1, 10000) AS n RETURN n"
 
-        try? performAsLoggedIn { (conn, dispatchGroup) in
+        try? performAsLoggedIn { (conn) in
 
             let request = Request.run(statement: stmt, parameters: Map(dictionary: [:]))
-            let promise = try? conn.request(request)
+            let promise = conn.request(request)
             
-            promise?.whenSuccess { (responses) in
+            promise.whenSuccess { (responses) in
 
                 let request = Request.pullAll()
-                try? conn.request(request)?.whenSuccess { (responses) in
+                conn.request(request).whenSuccess { (responses) in
 
                     let records = responses.filter { $0.category == .record }
                     XCTAssertEqual(10000, records.count)
@@ -246,7 +250,7 @@ extension SocketTests {
                 }
             }
             
-            promise?.whenFailure{ error in
+            promise.whenFailure{ error in
                 XCTFail(String(describing: error))
                 exp.fulfill()
             }
@@ -264,12 +268,12 @@ extension SocketTests {
 
         let stmt = "UNWIND RANGE(1, 10) AS n RETURN n, n * n as n_sq"
 
-        try? performAsLoggedIn { (conn, dispatchGroup) in
+        try? performAsLoggedIn { (conn) in
 
             let request = Request.run(statement: stmt, parameters: Map(dictionary: [:]))
-            let promise = try? conn.request(request)
+            let promise = conn.request(request)
             
-            promise?.whenSuccess { (responses) in
+            promise.whenSuccess { (responses) in
                 
                 XCTAssertEqual(1, responses.count)
                 let fields = (responses[0].items[0] as! Map).dictionary["fields"] as! List
@@ -277,7 +281,7 @@ extension SocketTests {
 
 
                 let request = Request.pullAll()
-                try? conn.request(request)?.whenSuccess { (responses) in
+                conn.request(request).whenSuccess { (responses) in
 
                     
                     let records = responses.filter { $0.category == .record && ($0.items[0] as! List).items.count == 2 }
@@ -287,7 +291,7 @@ extension SocketTests {
                 }
             }
             
-            promise?.whenFailure{ error in
+            promise.whenFailure{ error in
                 XCTFail(String(describing: error))
                 exp.fulfill()
             }

@@ -25,17 +25,13 @@ class BoltTests: XCTestCase {
         let socket = try UnencryptedSocket(hostname: config.hostname, port: config.port)
         let conn = Connection(socket: socket, settings: settings)
         try conn.connect { (error) in
-            do {
-                if let error = error {
-                    XCTFail("Could not connect successfully")
+            if let error = error {
+                XCTFail("Could not connect successfully: \(String(describing: error))")
+                connectionExp.fulfill()
+            } else {
+                self.createNode(connection: conn) { _ in
                     connectionExp.fulfill()
-                } else {
-                    self.createNode(connection: conn) { _ in
-                        connectionExp.fulfill()
-                    }
                 }
-            } catch(let error) {
-                XCTFail("Did not expect any errors, but got \(error)")
             }
         }
         
@@ -78,7 +74,7 @@ class BoltTests: XCTestCase {
     }
     
     func testUnwindEncrypted() throws {
-        var config = TestConfig.loadConfig()
+        let config = TestConfig.loadConfig()
         let connectionExp = expectation(description: "Login successful")
         
         let settings = ConnectionSettings(username: config.username, password: config.password)
@@ -116,7 +112,7 @@ class BoltTests: XCTestCase {
         let statement = "UNWIND range(1, 10000) AS n RETURN n"
         
         let request = Request.run(statement: statement, parameters: Map(dictionary: [:]))
-        try? conn.request(request)?.whenSuccess { _ in
+        conn.request(request).whenSuccess { _ in
             self.pullResultsExpectingAtLeastNumberOfResults(num: 10000 - 1, connection: conn) { success in
                 completion(success)
             }
@@ -132,42 +128,28 @@ class BoltTests: XCTestCase {
             let statement = "CREATE (n:FirstNode {name:$name}) RETURN n"
             let parameters = Map(dictionary: [ "name": "Steven" ])
             let request = Request.run(statement: statement, parameters: parameters)
-            do {
-                try conn.request(request)?.whenSuccess { _ in
-                    do {
-                        try self.pullResults(connection: conn) { _ in
-                            completion(true)
-                        }
-                    } catch(let error) {
-                        XCTFail("Did not expect any errors, but got \(error)")
-                        completion(false)
-                    }
+            conn.request(request).whenSuccess { _ in
+                self.pullResults(connection: conn) { _ in
+                    completion(true)
                 }
-            } catch {
-                completion(false)
             }
         }
     }
     
     func pullResults(connection conn: Connection, completion: @escaping (Bool) -> ()) {
-        return try pullResultsExpectingAtLeastNumberOfResults(num: 0, connection: conn, completion: completion)
+        return pullResultsExpectingAtLeastNumberOfResults(num: 0, connection: conn, completion: completion)
     }
     
     func pullResultsExpectingAtLeastNumberOfResults(num: Int, connection conn: Connection, completion: @escaping (Bool) -> ()) {
         
         let request = Request.pullAll()
-        do {
-            try conn.request(request)?.whenSuccess { responses in
-                if responses.count > num {
-                    completion(true)
-                } else {
-                    XCTFail("Did not find sufficient amount of results. Found \(responses.count) instead of \(num)")
-                    completion(false)
-                }
+        conn.request(request).whenSuccess { responses in
+            if responses.count > num {
+                completion(true)
+            } else {
+                XCTFail("Did not find sufficient amount of results. Found \(responses.count) instead of \(num)")
+                completion(false)
             }
-        } catch {
-            XCTFail(error.localizedDescription)
-            completion(false)
         }
     }
     

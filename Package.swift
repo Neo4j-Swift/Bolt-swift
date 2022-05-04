@@ -20,9 +20,9 @@ let package = Package(
     name: "Bolt",
     
     platforms: [
-        .macOS(.v10_14), 
-        .iOS(.v12),
-        .tvOS(.v12),
+        .macOS(.v10_15), 
+        .iOS(.v13),
+        .tvOS(.v13),
     ],
     
     products: [
