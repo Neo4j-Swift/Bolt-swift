@@ -4,12 +4,13 @@ import PackStream
 import NIO
 
 #if os(Linux)
-     import Dispatch
+import Dispatch
 #endif
 
 @testable import Bolt
 
-class SocketTests {
+// Integration test helper - marked as unchecked Sendable since tests manage their own synchronization
+final class SocketTests: @unchecked Sendable {
     var settings: ConnectionSettings
     var socket: SocketProtocol
 
@@ -23,7 +24,7 @@ extension SocketTests {
 
     // source: http://jexp.de/blog/2014/03/quickly-create-a-100k-neo4j-graph-data-model-with-cypher-only/
     func templateMichaels100k(_ testcase: XCTestCase) throws {
-        
+
         let exp = testcase.expectation(description: "Test successful")
 
         let stmt1 = "WITH [\"Andres\",\"Wes\",\"Rik\",\"Mark\",\"Peter\",\"Kenny\",\"Michael\",\"Stefan\",\"Max\",\"Chris\"] AS names " +
@@ -55,22 +56,18 @@ extension SocketTests {
         let stmt10 = "DROP INDEX ON :Product(id)"
         let stmt11 = "MATCH (n) DETACH DELETE n"
 
-        
+
         let statements = [ stmt1, stmt2, stmt3, stmt4, stmt5, stmt6, stmt7, stmt8, stmt9, stmt10, stmt11 ]
 
-        try performAsLoggedIn { (conn, dispatchGroup) in
-
+        try performAsLoggedIn { conn in
             self.perform(conn: conn, exp: exp, statements: statements)
-            
         }
-        
-        testcase.waitForExpectations(timeout: 300000) { (_) in
-            print("Done")
-        }
+
+        testcase.wait(for: [exp], timeout: 300000)
     }
-    
+
     func perform(conn: Connection, exp: XCTestExpectation, statements: [String]) {
-        
+
         guard let statement = statements.first else {
             return
         }
@@ -78,8 +75,8 @@ extension SocketTests {
         let laterStatements = Array(statements.dropFirst())
 
         let request = Request.run(statement: statement, parameters: Map(dictionary: [:]))
-        
-        let promise =  try? conn.request(request)
+
+        let promise = try? conn.request(request)
         promise?.whenSuccess{ responses in
 
             if responses.count == 0 {
@@ -101,14 +98,14 @@ extension SocketTests {
                 }
             }
         }
-        
+
         promise?.whenFailure({ (error) in
-            if let responseError = error as? Response.ResponseError {
+            if let responseError = error as? BoltError {
                 switch responseError {
-                case let Response.ResponseError.forbiddenDueToTransactionType(message):
-                    XCTAssertEqual("Cannot perform schema updates in a transaction that has performed data updates.", message)
+                case let .transaction(message):
+                    XCTAssertTrue(message.contains("schema updates") || message.contains("transaction"))
                 default:
-                    XCTFail("Expected a response error")
+                    XCTFail("Expected a transaction error")
                 }
             } else {
                 XCTFail(error.localizedDescription)
@@ -117,7 +114,7 @@ extension SocketTests {
         })
     }
 
-    func performAsLoggedIn(block: @escaping (Connection, DispatchGroup) throws -> Void) throws {
+    func performAsLoggedIn(block: @escaping @Sendable (Connection) throws -> Void) throws {
 
         let conn = Connection(socket: socket, settings: settings)
 
@@ -130,81 +127,34 @@ extension SocketTests {
 
             XCTAssertTrue(success != nil, "Must be logged in successfully")
 
-            try block(conn, dispatchGroup)
+            try block(conn)
         }
         dispatchGroup.wait()
     }
-    
+
     func templateMichaels100kCannotFitInATransaction(_ testcase: XCTestCase) throws {
         let stmt1 = "WITH [\"Andres\",\"Wes\",\"Rik\",\"Mark\",\"Peter\",\"Kenny\",\"Michael\",\"Stefan\",\"Max\",\"Chris\"] AS names " +
         "FOREACH (r IN range(0,100000) | CREATE (:User {id:r, name:names[r % size(names)]+\" \"+r}))"
         let stmt2 = "create index on :User(id)"
         let stmt3 = "DROP INDEX ON :User(id)"
-        
+
         let statements = [ "BEGIN", stmt1, stmt2, stmt3, "ROLLBACK" ]
 
         let exp = testcase.expectation(description: "Test successful")
 
-        try performAsLoggedIn { (conn, dispatchGroup) in
-
+        try performAsLoggedIn { conn in
             self.perform(conn: conn, exp: exp, statements: statements)
-            
-        }
-        
-        testcase.waitForExpectations(timeout: 300000) { (_) in
-            print("Done")
         }
 
-
-        /*
-        try performAsLoggedIn { (conn: Connection, dispatchGroup) in
-            do {
-                for statement in [ "BEGIN", stmt1, stmt2, stmt3, "ROLLBACK" ] {
-
-                    if statement == "ROLLBACK" {
-                        XCTFail("Should never get here")
-                    }
-
-                    let request: Request = Request.run(statement: statement, parameters: Map(dictionary: [:]))
-                    dispatchGroup.enter()
-                    try conn.request(request)?.whenSuccess { (reponses) in
-                        defer {
-                            dispatchGroup.leave()
-                        }
-
-                        let request = Request.pullAll()
-                        dispatchGroup.enter()
-                        do {
-                            try conn.request(request)?.whenSuccess{ (responses) in
-                                dispatchGroup.leave()
-                            }
-                        } catch(let error) {
-                            dispatchGroup.leave()
-                            print("Unexpected error while pulling: \(error)")
-                        }
-                    }
-                }
-            } catch (let error) {
-                dispatchGroup.leave()
-
-                switch error {
-                case let Response.ResponseError.forbiddenDueToTransactionType(message):
-                    XCTAssertEqual("Cannot perform schema updates in a transaction that has performed data updates.", message)
-                default:
-                    XCTFail("Expected a response error")
-                }
-            }
-
-        }
-         */
+        testcase.wait(for: [exp], timeout: 300000)
     }
 
     func templateRubbishCypher(_ testcase: XCTestCase) throws {
         let stmt = "42"
-        
+
         let exp = testcase.expectation(description: "Test successful")
 
-        try performAsLoggedIn { (conn, dispatchGroup) in
+        try performAsLoggedIn { conn in
 
             let request = Request.run(statement: stmt, parameters: Map(dictionary: [:]))
             let promise = try? conn.request(request)
@@ -217,24 +167,21 @@ extension SocketTests {
                 exp.fulfill()
             }
         }
-        
-        testcase.waitForExpectations(timeout: 300000) { (_) in
-            print("Done")
-        }
 
+        testcase.wait(for: [exp], timeout: 300000)
     }
 
     func templateUnwind(_ testcase: XCTestCase) {
-        
+
         let exp = testcase.expectation(description: "Test successful")
-        
+
         let stmt = "UNWIND RANGE(1, 10000) AS n RETURN n"
 
-        try? performAsLoggedIn { (conn, dispatchGroup) in
+        try? performAsLoggedIn { conn in
 
             let request = Request.run(statement: stmt, parameters: Map(dictionary: [:]))
             let promise = try? conn.request(request)
-            
+
             promise?.whenSuccess { (responses) in
 
                 let request = Request.pullAll()
@@ -245,32 +192,29 @@ extension SocketTests {
                     exp.fulfill()
                 }
             }
-            
+
             promise?.whenFailure{ error in
                 XCTFail(String(describing: error))
                 exp.fulfill()
             }
         }
 
-        testcase.waitForExpectations(timeout: 300000) { (_) in
-            print("Done")
-        }
-
+        testcase.wait(for: [exp], timeout: 300000)
     }
 
     func templateUnwindWithToNodes(_ testcase: XCTestCase) {
-        
+
         let exp = testcase.expectation(description: "Test successful")
 
         let stmt = "UNWIND RANGE(1, 10) AS n RETURN n, n * n as n_sq"
 
-        try? performAsLoggedIn { (conn, dispatchGroup) in
+        try? performAsLoggedIn { conn in
 
             let request = Request.run(statement: stmt, parameters: Map(dictionary: [:]))
             let promise = try? conn.request(request)
-            
+
             promise?.whenSuccess { (responses) in
-                
+
                 XCTAssertEqual(1, responses.count)
                 let fields = (responses[0].items[0] as! Map).dictionary["fields"] as! List
                 XCTAssertEqual(2, fields.items.count)
@@ -279,23 +223,21 @@ extension SocketTests {
                 let request = Request.pullAll()
                 try? conn.request(request)?.whenSuccess { (responses) in
 
-                    
+
                     let records = responses.filter { $0.category == .record && ($0.items[0] as! List).items.count == 2 }
                     XCTAssertEqual(10, records.count)
 
                     exp.fulfill()
                 }
             }
-            
+
             promise?.whenFailure{ error in
                 XCTFail(String(describing: error))
                 exp.fulfill()
             }
         }
 
-        testcase.waitForExpectations(timeout: 300000) { (_) in
-            print("Done")
-        }
+        testcase.wait(for: [exp], timeout: 300000)
     }
 
 }

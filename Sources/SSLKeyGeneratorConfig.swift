@@ -1,6 +1,9 @@
 import Foundation
 
-public struct SSLKeyGeneratorConfig {
+// MARK: - SSL Key Generator Configuration
+
+/// Configuration for generating SSL keys
+public struct SSLKeyGeneratorConfig: Sendable {
     public let signingRequestFileName: String
     public let countryName: String
     public let stateOrProvinceName: String
@@ -20,8 +23,8 @@ public struct SSLKeyGeneratorConfig {
         orgUnitName: String,
         commonName: String,
         emailAddress: String,
-        companyName: String) {
-
+        companyName: String
+    ) {
         self.signingRequestFileName = signingRequestFileName
         self.countryName = countryName
         self.stateOrProvinceName = stateOrProvinceName
@@ -34,7 +37,6 @@ public struct SSLKeyGeneratorConfig {
     }
 
     public init(json: [String: Any]) {
-
         signingRequestFileName = json["signingRequestFileName"] as? String ?? "csr.csr"
         countryName = json["countryName"] as? String ?? "DK"
         stateOrProvinceName = json["stateOrProvinceName"] as? String ?? "Esbjerg"
