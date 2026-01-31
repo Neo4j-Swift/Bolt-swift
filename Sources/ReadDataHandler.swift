@@ -1,155 +1,141 @@
 import Foundation
-import NIO
+import NIOCore
 import PackStream
 
-class ReadDataHandler: ChannelInboundHandler {
-    public typealias InboundIn = ByteBuffer
-    public typealias OutboundOut = ByteBuffer
+// MARK: - Read Data Handler
 
-    var dataBuffer: [UInt8] = []
+/// NIO channel handler for reading Bolt protocol data
+final class ReadDataHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
 
-    var dataReceivedBlock: (([UInt8]) -> Void)?
+    private var dataBuffer: [UInt8] = []
+    private let lock = NSLock()
 
-    public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        #if BOLT_DEBUG
-        print("read....")
-        #endif
-        let buffer = self.unwrapInboundIn(data)
+    var dataReceivedBlock: (@Sendable ([UInt8]) -> Void)?
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let buffer = unwrapInboundIn(data)
 
         defer {
             context.fireChannelRead(data)
         }
 
         let readableBytes = buffer.readableBytes
-
-        if readableBytes == 0 {
-            // print("nothing left to read, close the channel")
+        guard readableBytes > 0 else {
             context.close(promise: nil)
             return
         }
 
         let bytes = buffer.getBytes(at: 0, length: readableBytes) ?? []
 
-        if readableBytes == 4 && bytes[0] == 0 && bytes[1] == 0 { // It's just an init response
+        // Handle 4-byte init response
+        if readableBytes == 4 && bytes[0] == 0 && bytes[1] == 0 {
             dataReceivedBlock?(bytes)
             return
         }
 
-        self.dataBuffer.append(contentsOf: bytes)
+        lock.lock()
+        dataBuffer.append(contentsOf: bytes)
+        let currentBuffer = dataBuffer
+        lock.unlock()
 
-        if messageIsTerminated(self.dataBuffer) == false {
-            // Didn't end with 00:00, so more bytes should be coming
+        // Check if we have a complete message
+        guard messageIsTerminated(currentBuffer) else {
             return
         }
 
-        if messageIsError(self.dataBuffer) == false,
-           messageShouldEndInSummary(self.dataBuffer),
-           messageEndsInSummary(self.dataBuffer) == false {
-            // A longer message should always end in a summary. If not, wait for more data
+        if !messageIsError(currentBuffer),
+           messageShouldEndInSummary(currentBuffer),
+           !messageEndsInSummary(currentBuffer) {
             return
         }
 
-        // By this time we know we got a full message, so pass it back
-        let receivedBuffer = self.dataBuffer
-        self.dataBuffer = []
+        // Complete message received
+        lock.lock()
+        let receivedBuffer = dataBuffer
+        dataBuffer = []
+        lock.unlock()
+
         dataReceivedBlock?(receivedBuffer)
     }
 
-        public func errorCaught(context: ChannelHandlerContext, error: Error) {
-            print("error: ", error)
-
-            // As we are not really interested getting notified on success or failure we just pass nil as promise to
-            // reduce allocations.
-            context.close(promise: nil)
-        }
-
-    public func _errorCaught(context: ChannelHandlerContext, error: Error) {
-        print("error: \(error.localizedDescription)")
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        #if BOLT_DEBUG
+        print("Socket error: \(error)")
+        #endif
         context.close(promise: nil)
     }
 
-    func messageIsTerminated(_ bytes: [UInt8]) -> Bool {
+    // MARK: - Message Analysis
 
-        let length = bytes.count
-        if length < 2 {
-            return false
-        }
-
-        if bytes[length - 1] != 0 {
-            return false
-        }
-
-        if bytes[length - 2] != 0 {
-            return false
-        }
-
-        return true
-    }
-    
-    func messageIsError(_ bytes: [UInt8]) -> Bool {
-        let n = bytes.count
-        if n <= 4 {
-            return false
-        }
-        
-        return bytes[3] == 0x7f && bytes[n-1] == 0x00 && bytes[n-2] == 0x00
+    private func messageIsTerminated(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count >= 2 else { return false }
+        return bytes[bytes.count - 1] == 0 && bytes[bytes.count - 2] == 0
     }
 
-    func messageShouldEndInSummary(_ bytes: [UInt8]) -> Bool {
-        if self.dataBuffer[3] == Connection.CommandResponse.record.rawValue {
+    private func messageIsError(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count > 4 else { return false }
+        return bytes[3] == ResponseCategory.failure.rawValue &&
+               bytes[bytes.count - 1] == 0 &&
+               bytes[bytes.count - 2] == 0
+    }
+
+    private func messageShouldEndInSummary(_ bytes: [UInt8]) -> Bool {
+        lock.lock()
+        let buffer = dataBuffer
+        lock.unlock()
+
+        guard buffer.count > 3 else { return false }
+
+        if buffer[3] == ResponseCategory.record.rawValue {
             return true
         }
-
         return bytes.count > 256
     }
 
     private func findPositionOfTerminator(in bytes: ArraySlice<UInt8>) -> Int? {
-        if bytes.endIndex - bytes.startIndex - 1 < 0 {
-            return nil
-        }
+        guard bytes.count >= 2 else { return nil }
 
-        for i in bytes.startIndex ..< (bytes.endIndex - 1) {
-            if bytes[i] == 0 && bytes[i+1] == 0 {
+        for i in bytes.startIndex..<(bytes.endIndex - 1) {
+            if bytes[i] == 0 && bytes[i + 1] == 0 {
                 return i
             }
         }
-
         return nil
     }
 
-    func messageEndsInSummary(_ bytes: [UInt8]) -> Bool {
-
-        // short path
+    private func messageEndsInSummary(_ bytes: [UInt8]) -> Bool {
         let byteCount = bytes.count
         let limiter = 400
-        let slice = byteCount > limiter ? bytes[(byteCount - limiter)..<byteCount] : bytes[0..<byteCount]
-        if  let positionOfTerminator = findPositionOfTerminator(in: slice) {
-            let fixedSlice = Array<UInt8>(bytes[(positionOfTerminator+2)..<byteCount])
+        let slice = byteCount > limiter ?
+            bytes[(byteCount - limiter)..<byteCount] :
+            bytes[0..<byteCount]
+
+        if let positionOfTerminator = findPositionOfTerminator(in: slice) {
+            let fixedSlice = Array<UInt8>(bytes[(positionOfTerminator + 2)..<byteCount])
             if let chunks = try? Response.unchunk(fixedSlice),
-                let lastChunk = chunks.last,
-                let lastRecord = try? Response.unpack(lastChunk) {
-                if lastRecord.category == Response.Category.success {
+               let lastChunk = chunks.last,
+               let lastRecord = try? Response.unpack(lastChunk) {
+                if lastRecord.category == .success {
                     return true
                 }
             }
         }
 
-        // long path
+        // Long path - parse all chunks
+        lock.lock()
+        let buffer = dataBuffer
+        lock.unlock()
+
         do {
-            let chunks = try Response.unchunk(self.dataBuffer)
-            let packs = try chunks.map { (bytes) -> Response in
-                return try Response.unpack(bytes)
-            }
+            let chunks = try Response.unchunk(buffer)
+            let packs = try chunks.map { try Response.unpack($0) }
             if let lastResponse = packs.last {
-                if lastResponse.category == Response.Category.success {
-                    return true
-                }
+                return lastResponse.category == .success
             }
         } catch {}
 
-        // no success
         return false
     }
-
 }
-

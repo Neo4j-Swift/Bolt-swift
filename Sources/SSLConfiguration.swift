@@ -1,13 +1,14 @@
 import Foundation
 
-public struct SSLConfiguration {
+// MARK: - SSL Configuration
+
+/// Configuration for TLS/SSL connections
+public struct SSLConfiguration: Sendable {
     public let temporarySSLKeyPath: String
     public let certificatePKCS12FileName: String
     public let certificatePKCS12Password: String
-
     public let keyFileName: String
     public let certificatePEMFilename: String
-
     public let generator: SSLKeyGeneratorConfig
 
     public init(
@@ -16,8 +17,8 @@ public struct SSLConfiguration {
         certificatePKCS12Password: String,
         keyFileName: String,
         certificatePEMFilename: String,
-        generator: SSLKeyGeneratorConfig) {
-
+        generator: SSLKeyGeneratorConfig
+    ) {
         self.temporarySSLKeyPath = temporarySSLKeyPath
         self.certificatePKCS12FileName = certificatePKCS12FileName
         self.certificatePKCS12Password = certificatePKCS12Password

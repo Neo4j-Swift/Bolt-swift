@@ -1,7 +1,10 @@
 import Foundation
 import PackStream
-import NIO
+import NIOCore
+import NIOPosix
 import NIOTransportServices
+
+// MARK: - Bootstrap Protocol
 
 internal protocol Bootstrap {
     func connect(host: String, port: Int) -> EventLoopFuture<Channel>
@@ -13,30 +16,28 @@ extension ClientBootstrap: Bootstrap {}
 extension NIOTSConnectionBootstrap: Bootstrap {}
 #endif
 
-struct PromiseHolder {
+// MARK: - Promise Holder
+
+struct PromiseHolder: Sendable {
     let uuid: UUID = UUID()
-    let promise: EventLoopPromise<Array<UInt8>>
+    let promise: EventLoopPromise<[UInt8]>
 }
 
-public class UnencryptedSocket {
+// MARK: - Unencrypted Socket
 
-    var cnt = 1
-
+/// Unencrypted Bolt socket implementation using SwiftNIO
+public class UnencryptedSocket: @unchecked Sendable {
     let hostname: String
     let port: Int
 
-    var group: EventLoopGroup?
-    var bootstrap: Bootstrap?
-    var channel: Channel?
+    private var group: EventLoopGroup?
+    private var bootstrap: Bootstrap?
+    private var channel: Channel?
 
-    //var readGroup: DispatchGroup?
-    // var readPromise: EventLoopPromise<[Byte]>?
-    var activePromises: [PromiseHolder] = []
-    //var receivedData: [UInt8] = []
+    private var activePromises: [PromiseHolder] = []
+    private let promiseLock = NSLock()
 
-    fileprivate static let readBufferSize = 8192
-
-    let dataHandler = ReadDataHandler()
+    private let dataHandler = ReadDataHandler()
 
     public init(hostname: String, port: Int) throws {
         self.hostname = hostname
@@ -44,85 +45,60 @@ public class UnencryptedSocket {
     }
 
     #if os(Linux)
-
-    // Linux version
-    func setupBootstrap(_ group: MultiThreadedEventLoopGroup, _ dataHandler: ReadDataHandler) -> (Bootstrap) {
-
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-
+    func setupBootstrap(_ group: MultiThreadedEventLoopGroup, _ dataHandler: ReadDataHandler) -> Bootstrap {
         return ClientBootstrap(group: group)
             .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelInitializer { channel in
-                return channel.pipeline.addHandler(dataHandler)
+                channel.pipeline.addHandler(dataHandler)
             }
     }
-
     #else
-
-    // Apple version
-    func setupBootstrap(_ group: MultiThreadedEventLoopGroup, _ dataHandler: ReadDataHandler) -> (Bootstrap) {
-
-        let overrideGroup = NIOTSEventLoopGroup(loopCount: 1, defaultQoS: .utility)
-
-        return NIOTSConnectionBootstrap(group: overrideGroup)
+    func setupBootstrap(_ group: MultiThreadedEventLoopGroup, _ dataHandler: ReadDataHandler) -> Bootstrap {
+        let tsGroup = NIOTSEventLoopGroup(loopCount: 1, defaultQoS: .utility)
+        return NIOTSConnectionBootstrap(group: tsGroup)
             .channelInitializer { channel in
-                // print("#2")
-                return channel.pipeline.addHandlers([dataHandler], position: .last)
-        }
-    }
-
-    #endif
-
-    public func connect(timeout: Int, completion: @escaping (Error?) -> ()) throws {
-
-        self.dataHandler.dataReceivedBlock = { data in
-            //print("Got \(data.count) bytes: ")
-            //print(Data(bytes: data, count: data.count).hexEncodedString())
-            if let promise = self.activePromises.first?.promise {
-                promise.succeed(data)
+                channel.pipeline.addHandlers([dataHandler], position: .last)
             }
+    }
+    #endif
+}
+
+// MARK: - SocketProtocol Conformance
+
+extension UnencryptedSocket: SocketProtocol {
+    public func connect(timeout: Int, completion: @escaping @Sendable (Error?) -> Void) throws {
+        dataHandler.dataReceivedBlock = { [weak self] data in
+            guard let self = self else { return }
+            self.promiseLock.lock()
+            let promise = self.activePromises.first?.promise
+            self.promiseLock.unlock()
+            promise?.succeed(data)
         }
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         self.group = group
 
         #if os(Linux)
-        let bootstrap = setupBootstrap(group, self.dataHandler) as! ClientBootstrap
+        var bootstrap = setupBootstrap(group, dataHandler) as! ClientBootstrap
+        bootstrap = bootstrap.connectTimeout(TimeAmount.milliseconds(Int64(timeout)))
         #else
-        let bootstrap = setupBootstrap(group, self.dataHandler) as! NIOTSConnectionBootstrap
+        var bootstrap = setupBootstrap(group, dataHandler) as! NIOTSConnectionBootstrap
+        bootstrap = bootstrap.connectTimeout(TimeAmount.milliseconds(Int64(timeout)))
         #endif
 
         self.bootstrap = bootstrap
-        // print("#1")
-        _ = bootstrap.connectTimeout(TimeAmount.milliseconds(Int64(timeout)))
-        bootstrap.connect(host: hostname, port: port).map{ theChannel -> Void in
+
+        bootstrap.connect(host: hostname, port: port).map { theChannel -> Void in
             self.channel = theChannel
-        }.whenComplete { (result) in
-            
+        }.whenComplete { result in
             switch result {
-            case let .failure(error):
+            case .failure(let error):
                 completion(error)
-            case .success(_):
+            case .success:
                 completion(nil)
             }
         }
-/*
-        }.whenSuccess { _ in
-            completion()
-        }*/
-        
     }
-}
-
-extension Array where Element == Byte {
-    func toString() -> String {
-        return self.reduce("", { (oldResult, i) -> String in
-            return oldResult + (oldResult == "" ? "" : ":") + String(format: "%02x", i)
-        })
-    }
-}
-
-extension UnencryptedSocket: SocketProtocol {
 
     public func disconnect() {
         try? channel?.close(mode: .all).wait()
@@ -130,60 +106,64 @@ extension UnencryptedSocket: SocketProtocol {
     }
 
     public func send(bytes: [Byte]) -> EventLoopFuture<Void>? {
-
         guard let channel = channel else { return nil }
 
-        let didSendFuture: EventLoopPromise<Void>  = channel.eventLoop.makePromise()
-        
-        
+        let promise: EventLoopPromise<Void> = channel.eventLoop.makePromise()
+
         var buffer = channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
-        
-        // let c = cnt
-        // cnt = cnt + 1
-        
-        // print("\nSend #\(c)")
-        // print(Data(bytes: bytes, count: bytes.count).hexEncodedString())
-        
+
         channel.writeAndFlush(buffer).whenComplete { result in
-            // print("Did send #\(c)")
             switch result {
             case .failure(let error):
-                print(String(describing: error))
-                didSendFuture.fail(error)
-            case .success(_):
-                didSendFuture.succeed(())
+                #if BOLT_DEBUG
+                print("Send error: \(error)")
+                #endif
+                promise.fail(error)
+            case .success:
+                promise.succeed(())
             }
         }
-        
-        return didSendFuture.futureResult
+
+        return promise.futureResult
     }
-    
 
     public func receive(expectedNumberOfBytes: Int32) throws -> EventLoopFuture<[Byte]>? {
-
         guard let readPromise = channel?.eventLoop.makePromise(of: [Byte].self) else {
             return nil
         }
-        
-        // print("Made new promise")
-        //self.readPromise = readPromise
+
         let holder = PromiseHolder(promise: readPromise)
-        self.activePromises.append(holder)
-        // print("now we've got active promises: \(self.activePromises.count)")
 
-        self.channel?.read()
+        promiseLock.lock()
+        activePromises.append(holder)
+        promiseLock.unlock()
 
-        readPromise.futureResult.whenComplete { (_) in
+        channel?.read()
+
+        readPromise.futureResult.whenComplete { [weak self] _ in
+            guard let self = self else { return }
+            self.promiseLock.lock()
             self.activePromises = self.activePromises.filter { $0.uuid != holder.uuid }
-            // print("result, active promises: \(self.activePromises.count)")
+            self.promiseLock.unlock()
         }
-        
+
         return readPromise.futureResult
     }
 }
 
-// TODO: Remove debug tool
+// MARK: - Byte Array Extensions
+
+extension Array where Element == Byte {
+    func toString() -> String {
+        return self.reduce("") { (oldResult, i) -> String in
+            return oldResult + (oldResult == "" ? "" : ":") + String(format: "%02x", i)
+        }
+    }
+}
+
+// MARK: - Data Hex Encoding
+
 extension Data {
     struct HexEncodingOptions: OptionSet {
         let rawValue: Int
