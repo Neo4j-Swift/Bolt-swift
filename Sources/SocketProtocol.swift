@@ -43,3 +43,42 @@ extension SocketError: LocalizedError {
         }
     }
 }
+
+// MARK: - Async/Await Support
+
+/// Default async implementations that bridge to the callback/EventLoopFuture-based methods
+public extension SocketProtocol {
+
+    /// Connect to the server asynchronously
+    func connectAsync(timeout: Int) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            do {
+                try self.connect(timeout: timeout) { error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    /// Send bytes to the server asynchronously
+    func sendAsync(bytes: [Byte]) async throws {
+        guard let future = self.send(bytes: bytes) else {
+            throw SocketError.invalidState("No channel available for send")
+        }
+        try await future.get()
+    }
+
+    /// Receive bytes from the server asynchronously
+    func receiveAsync(expectedNumberOfBytes: Int32) async throws -> [Byte] {
+        guard let future = try self.receive(expectedNumberOfBytes: expectedNumberOfBytes) else {
+            throw SocketError.invalidState("No channel available for receive")
+        }
+        return try await future.get()
+    }
+}

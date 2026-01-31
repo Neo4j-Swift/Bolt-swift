@@ -129,7 +129,17 @@ public final class Connection: @unchecked Sendable {
 
     private func sendHello(on eventLoop: EventLoop) -> EventLoopFuture<Response> {
         let hello = Request.hello(settings: settings)
-        return sendRequest(hello, on: eventLoop)
+        let helloFuture = sendRequest(hello, on: eventLoop)
+
+        // For Bolt 5.1+, we need to send a separate LOGON message after HELLO
+        if negotiatedVersion >= .v5_1 {
+            return helloFuture.flatMap { _ in
+                let logon = Request.logon(settings: self.settings)
+                return self.sendRequest(logon, on: eventLoop)
+            }
+        }
+
+        return helloFuture
     }
 
     // MARK: - Request/Response
@@ -438,6 +448,320 @@ public final class Connection: @unchecked Sendable {
                 blockToBePerformed()
             }
         }
+    }
+}
+
+// MARK: - Async/Await API
+
+extension Connection {
+    /// Connect to the Neo4j server asynchronously
+    public func connectAsync() async throws {
+        try await socket.connectAsync(timeout: settings.connectionTimeoutMs)
+        let version = try await performHandshakeAsync()
+        self.negotiatedVersion = version
+        self.settings = self.settings.withBoltVersion(version)
+        let response = try await sendHelloAsync()
+        if let map = response.items.first as? Map {
+            self.serverMetadata = BoltConnectionMetadata(from: map)
+        }
+        self.isConnected = true
+    }
+
+    /// Perform Bolt protocol handshake asynchronously
+    /// Supports both legacy (Bolt 4.x) and manifest (Bolt 5.x) negotiation
+    private func performHandshakeAsync() async throws -> BoltVersion {
+        let handshakeBytes = BoltHandshake.createHandshakeWithRanges()
+        try await socket.sendAsync(bytes: handshakeBytes)
+        let responseBytes = try await socket.receiveAsync(expectedNumberOfBytes: 4)
+
+        // Check if server wants manifest negotiation (Bolt 5.x)
+        if BoltHandshake.isManifestNegotiation(responseBytes) {
+            return try await performManifestNegotiationAsync()
+        }
+
+        // Legacy negotiation (Bolt 4.x and earlier)
+        guard let version = BoltHandshake.parseVersionResponse(responseBytes) else {
+            throw BoltError.connection(message: "Server rejected all protocol versions")
+        }
+        return version
+    }
+
+    /// Perform manifest negotiation for Bolt 5.x servers
+    private func performManifestNegotiationAsync() async throws -> BoltVersion {
+        // Read the number of protocol offerings (varint)
+        let countByte = try await socket.receiveAsync(expectedNumberOfBytes: 1)
+        let offeringsCount = Int(countByte[0])
+
+        // Read all protocol offerings (each is 4 bytes: [minor, range, 0, major])
+        var offerings: [(major: UInt8, minor: UInt8, range: UInt8)] = []
+        for _ in 0..<offeringsCount {
+            let offeringBytes = try await socket.receiveAsync(expectedNumberOfBytes: 4)
+            let minor = offeringBytes[0]
+            let range = offeringBytes[1]
+            let major = offeringBytes[3]
+            offerings.append((major: major, minor: minor, range: range))
+        }
+
+        // Read capability mask (varint - for now we just consume it)
+        _ = try await socket.receiveAsync(expectedNumberOfBytes: 1)
+
+        // Select the best version we support from the offerings
+        // Client supports: Bolt 5.6→5.0, Bolt 4.4→4.2, Bolt 3.0
+        let clientVersions: [(major: UInt8, minor: UInt8, range: UInt8)] = [
+            (major: 5, minor: 6, range: 6),  // 5.6 → 5.0
+            (major: 4, minor: 4, range: 2),  // 4.4 → 4.2
+            (major: 3, minor: 0, range: 0),  // 3.0
+        ]
+
+        var chosenVersion: BoltVersion?
+
+        // Find highest mutually supported version
+        outer: for clientVer in clientVersions {
+            for clientMinor in stride(from: Int(clientVer.minor), through: Int(clientVer.minor) - Int(clientVer.range), by: -1) {
+                for offer in offerings {
+                    if offer.major == clientVer.major {
+                        let offerMinorMax = Int(offer.minor)
+                        let offerMinorMin = Int(offer.minor) - Int(offer.range)
+                        if clientMinor >= offerMinorMin && clientMinor <= offerMinorMax {
+                            chosenVersion = BoltVersion(major: clientVer.major, minor: UInt8(clientMinor))
+                            break outer
+                        }
+                    }
+                }
+            }
+        }
+
+        guard let version = chosenVersion else {
+            // Send invalid handshake to indicate failure
+            try await socket.sendAsync(bytes: [0x00, 0x00, 0x00, 0x00])
+            throw BoltError.connection(message: "No mutually supported Bolt version found")
+        }
+
+        // Send chosen version back to server (4 bytes: [minor, 0, 0, major])
+        let chosenBytes: [Byte] = [version.minor, 0, 0, version.major]
+        try await socket.sendAsync(bytes: chosenBytes)
+
+        return version
+    }
+
+    /// Send HELLO message asynchronously
+    /// For Bolt 5.1+, also sends LOGON message after HELLO
+    private func sendHelloAsync() async throws -> Response {
+        let hello = Request.hello(settings: settings)
+        let helloResponse = try await sendRequestAsync(hello)
+
+        // For Bolt 5.1+, we need to send a separate LOGON message after HELLO
+        if negotiatedVersion >= .v5_1 {
+            let logon = Request.logon(settings: settings)
+            return try await sendRequestAsync(logon)
+        }
+
+        return helloResponse
+    }
+
+    /// Send a single request and receive a single response asynchronously
+    private func sendRequestAsync(_ request: Request) async throws -> Response {
+        let chunks = try request.chunk()
+        for chunk in chunks {
+            try await socket.sendAsync(bytes: chunk)
+        }
+        return try await receiveResponseAsync()
+    }
+
+    /// Receive a single response asynchronously
+    private func receiveResponseAsync() async throws -> Response {
+        var accumulatedData: [Byte] = []
+        let maxChunkSize = Int32(Request.kMaxChunkSize)
+
+        while true {
+            let responseData = try await socket.receiveAsync(expectedNumberOfBytes: maxChunkSize)
+            accumulatedData.append(contentsOf: responseData)
+
+            // Check for message termination (0x00 0x00)
+            let isTerminated = responseData.count >= 2 &&
+                responseData[responseData.count - 1] == 0 &&
+                responseData[responseData.count - 2] == 0
+
+            if isTerminated {
+                break
+            }
+        }
+
+        guard let unchunked = try? Response.unchunk(accumulatedData),
+              let responseBytes = unchunked.first,
+              let response = try? Response.unpack(responseBytes) else {
+            throw BoltError.protocol(message: "Failed to parse response")
+        }
+
+        if response.category == .failure {
+            if let error = response.asError() {
+                throw error
+            }
+            throw BoltError.authentication(message: "Authentication failed")
+        }
+
+        return response
+    }
+
+    /// Send a request and receive multiple responses asynchronously
+    public func requestAsync(_ request: Request) async throws -> [Response] {
+        guard isConnected else {
+            throw BoltError.connection(message: "Bolt client is not connected")
+        }
+
+        let chunks = try request.chunk()
+        for chunk in chunks {
+            try await socket.sendAsync(bytes: chunk)
+        }
+
+        return try await receiveAllResponsesAsync()
+    }
+
+    /// Receive all responses until completion asynchronously
+    private func receiveAllResponsesAsync() async throws -> [Response] {
+        var accumulatedData: [Byte] = []
+        let maxChunkSize = Int32(Request.kMaxChunkSize)
+
+        while true {
+            let responseData = try await socket.receiveAsync(expectedNumberOfBytes: maxChunkSize)
+            accumulatedData.append(contentsOf: responseData)
+
+            if responseData.count < 2 {
+                continue
+            }
+
+            // Check for message termination (0x00 0x00)
+            let isTerminated = responseData[responseData.count - 1] == 0 &&
+                responseData[responseData.count - 2] == 0
+
+            if !isTerminated {
+                continue
+            }
+
+            // Parse responses
+            guard let unchunkedResponses = try? Response.unchunk(accumulatedData) else {
+                throw BoltError.protocol(message: "Failed to unchunk response")
+            }
+
+            var responses = [Response]()
+            var success = true
+
+            for responseBytes in unchunkedResponses {
+                guard let response = try? Response.unpack(responseBytes) else {
+                    throw BoltError.protocol(message: "Failed to parse response")
+                }
+
+                responses.append(response)
+
+                if let error = response.asError() {
+                    throw error
+                }
+
+                // Parse metadata from non-record responses
+                if response.category != .record {
+                    self.parseMeta(response.items)
+                }
+
+                success = success && response.category != .failure
+            }
+
+            // Continue if more records expected
+            if success && responses.count > 1 && responses.last?.category == .record {
+                continue
+            }
+
+            return responses
+        }
+    }
+
+    // MARK: - Async Transaction Support
+
+    /// Begin a transaction asynchronously
+    public func beginTransaction(
+        mode: TransactionMode = .readwrite,
+        database: String? = nil,
+        bookmarks: [String] = [],
+        metadata: [String: String] = [:],
+        timeoutMs: Int? = nil
+    ) async throws -> [Response] {
+        let bookmark = currentTransactionBookmark.map { [$0] } ?? bookmarks
+        let request = Request.begin(
+            mode: mode,
+            database: database ?? settings.database,
+            bookmarks: bookmark,
+            metadata: metadata,
+            timeoutMs: timeoutMs
+        )
+        return try await requestAsync(request)
+    }
+
+    /// Commit the current transaction asynchronously
+    public func commitTransaction() async throws -> [Response] {
+        return try await requestAsync(Request.commit())
+    }
+
+    /// Rollback the current transaction asynchronously
+    public func rollbackTransaction() async throws -> [Response] {
+        return try await requestAsync(Request.rollback())
+    }
+
+    // MARK: - Async Query Execution
+
+    /// Execute a Cypher query asynchronously
+    public func run(
+        _ statement: String,
+        parameters: [String: any PackProtocol] = [:],
+        database: String? = nil,
+        mode: TransactionMode? = nil
+    ) async throws -> [Response] {
+        let request = Request.run(
+            statement: statement,
+            parameters: parameters,
+            database: database ?? settings.database,
+            mode: mode
+        )
+        return try await requestAsync(request)
+    }
+
+    /// Pull results asynchronously (Bolt 4+)
+    public func pull(n: Int = -1, qid: Int = -1) async throws -> [Response] {
+        if negotiatedVersion >= .v4_0 {
+            return try await requestAsync(Request.pull(n: n, qid: qid))
+        } else {
+            return try await requestAsync(Request.pullAll())
+        }
+    }
+
+    /// Discard results asynchronously (Bolt 4+)
+    public func discard(n: Int = -1, qid: Int = -1) async throws -> [Response] {
+        if negotiatedVersion >= .v4_0 {
+            return try await requestAsync(Request.discard(n: n, qid: qid))
+        } else {
+            return try await requestAsync(Request.discardAll())
+        }
+    }
+
+    /// Reset the connection state asynchronously
+    public func reset() async throws -> [Response] {
+        return try await requestAsync(Request.reset())
+    }
+
+    // MARK: - Async Routing (Bolt 4.3+)
+
+    /// Get routing table for a database asynchronously
+    public func route(
+        routingContext: [String: String],
+        database: String? = nil
+    ) async throws -> [Response] {
+        guard capabilities.contains(.routing) else {
+            throw BoltError.protocol(message: "Routing not supported in Bolt \(negotiatedVersion)")
+        }
+        let request = Request.route(
+            routingContext: routingContext,
+            bookmarks: currentTransactionBookmark.map { [$0] } ?? [],
+            database: database ?? settings.database
+        )
+        return try await requestAsync(request)
     }
 }
 

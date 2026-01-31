@@ -19,12 +19,11 @@ public struct Request: Sendable {
 
     /// HELLO message (Bolt 3+)
     /// Initializes connection and authenticates
+    /// - For Bolt 3.0-5.0: Auth is included in HELLO
+    /// - For Bolt 5.1+: Auth should be sent separately via LOGON message
     public static func hello(settings: ConnectionSettings, routingContext: [String: String]? = nil) -> Request {
         var extra: [String: any PackProtocol] = [
             "user_agent": settings.userAgent,
-            "scheme": "basic",
-            "principal": settings.username,
-            "credentials": settings.password,
         ]
 
         // Add routing context for cluster connections (Bolt 4.1+)
@@ -32,9 +31,16 @@ public struct Request: Sendable {
             extra["routing"] = Map(dictionary: routing)
         }
 
-        // Bolt version features
-        if settings.boltVersion >= .v5_1 {
-            // Bolt 5.1+ supports notifications configuration
+        // For Bolt 5.1+, auth is sent via separate LOGON message
+        // For older versions, include auth in HELLO
+        if settings.boltVersion < .v5_1 {
+            extra["scheme"] = "basic"
+            extra["principal"] = settings.username
+            extra["credentials"] = settings.password
+        }
+
+        // Bolt 5.2+ supports notifications configuration in HELLO
+        if settings.boltVersion >= .v5_2 {
             if let minSeverity = settings.notificationsMinSeverity {
                 extra["notifications_minimum_severity"] = minSeverity
             }

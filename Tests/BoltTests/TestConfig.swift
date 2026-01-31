@@ -40,12 +40,25 @@ struct TestConfig {
     }
 
     static func loadConfig() -> TestConfig {
+        // Try multiple locations for the config file
+        let possiblePaths = [
+            // Source directory (when running in Xcode or from source)
+            URL(fileURLWithPath: #file).deletingLastPathComponent().appendingPathComponent("BoltSwiftTestConfig.json").path,
+            // Package root (when running swift test)
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Tests/BoltTests/BoltSwiftTestConfig.json").path,
+            // Relative from working directory
+            "Tests/BoltTests/BoltSwiftTestConfig.json"
+        ]
 
-        let testPath = URL(fileURLWithPath: #file).deletingLastPathComponent().path
+        for path in possiblePaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return TestConfig(pathToFile: path)
+            }
+        }
 
-        let filePath = "\(testPath)/BoltSwiftTestConfig.json"
-
-        return TestConfig(pathToFile: filePath)
+        // Fall back to first path even if it doesn't exist (will use defaults)
+        return TestConfig(pathToFile: possiblePaths[0])
     }
 
 }

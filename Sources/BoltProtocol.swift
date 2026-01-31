@@ -118,29 +118,45 @@ public struct BoltHandshake: Sendable {
         return bytes
     }
 
-    /// Create handshake bytes with version ranges (Bolt 4.1+)
+    /// Create handshake bytes with supported Bolt versions
+    /// Uses exact version proposals for maximum compatibility
     public static func createHandshakeWithRanges() -> [Byte] {
         var bytes = preamble
 
-        // Propose versions with ranges for better negotiation
-        // Slot 1: Bolt 5.6 with range to 5.0
-        bytes.append(contentsOf: [6, 6, 0, 5]) // 5.6 down to 5.0
+        // Propose exact versions in descending order of preference
+        // Note: Version ranges are not universally supported by all Neo4j versions,
+        // so we use exact version proposals for maximum compatibility
 
-        // Slot 2: Bolt 4.4 with range to 4.2
-        bytes.append(contentsOf: [4, 2, 0, 4]) // 4.4 down to 4.2
+        // Slot 1: Bolt 5.4 (Neo4j 5.x with latest features)
+        bytes.append(contentsOf: BoltVersion.v5_4.encode())
 
-        // Slot 3: Bolt 4.1 with range to 4.0
-        bytes.append(contentsOf: [1, 1, 0, 4]) // 4.1 down to 4.0
+        // Slot 2: Bolt 4.4 (Neo4j 4.4 LTS)
+        bytes.append(contentsOf: BoltVersion.v4_4.encode())
 
-        // Slot 4: Bolt 3
+        // Slot 3: Bolt 4.0 (Neo4j 4.0-4.3)
+        bytes.append(contentsOf: BoltVersion.v4_0.encode())
+
+        // Slot 4: Bolt 3 (Neo4j 3.5)
         bytes.append(contentsOf: BoltVersion.v3.encode())
 
         return bytes
     }
 
-    /// Parse server's version response
+    /// Check if server response indicates manifest negotiation (Bolt 5.0+ feature)
+    /// Note: Manifest negotiation is not currently used as it's not universally supported
+    public static func isManifestNegotiation(_ bytes: [Byte]) -> Bool {
+        guard bytes.count >= 4 else { return false }
+        // Manifest marker: major=0xFF, minor=0x01 (in little-endian order: [minor, _, _, major])
+        return bytes[3] == 0xFF && bytes[0] == 0x01
+    }
+
+    /// Parse server's version response (legacy 4-byte response)
     public static func parseVersionResponse(_ bytes: [Byte]) -> BoltVersion? {
         guard bytes.count == 4 else { return nil }
+        // Check for manifest negotiation marker
+        if isManifestNegotiation(bytes) {
+            return nil // Caller needs to handle manifest negotiation
+        }
         let version = BoltVersion(bytes: bytes)
         return version.major > 0 ? version : nil
     }
