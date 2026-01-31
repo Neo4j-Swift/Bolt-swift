@@ -23,7 +23,6 @@ class EncryptedSocketTests: XCTestCase {
         }
     }
 
-    /*
     static var allTests: [(String, (EncryptedSocketTests) -> () throws -> Void)] {
         return [
             ("testMichaels100k", testMichaels100k),
@@ -32,7 +31,7 @@ class EncryptedSocketTests: XCTestCase {
             ("testUnwind", testUnwind),
             ("testUnwindWithToNodes", testUnwindWithToNodes)
         ]
-    }*/
+    }
 
     func testMichaels100k() throws {
         XCTAssertNotNil(socketTests)

@@ -320,6 +320,370 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(ResponseCategory.failure.rawValue, 0x7F)
     }
 
+    // MARK: - Mock Socket Connection Tests
+
+    func testConnectionInit() {
+        let mockSocket = MockSocket()
+        let settings = ConnectionSettings(username: "testuser", password: "testpass")
+        let connection = Connection(socket: mockSocket, settings: settings)
+
+        XCTAssertFalse(connection.isConnected)
+        XCTAssertEqual(connection.negotiatedVersion, .zero)
+        XCTAssertNil(connection.serverMetadata)
+        XCTAssertNil(connection.currentTransactionBookmark)
+    }
+
+    func testConnectionCapabilities() {
+        let mockSocket = MockSocket()
+        let connection = Connection(socket: mockSocket)
+
+        // Before connection, should have capabilities for default version
+        let caps = connection.capabilities
+        XCTAssertNotNil(caps)
+    }
+
+    func testConnectionDisconnect() {
+        let mockSocket = MockSocket()
+        let connection = Connection(socket: mockSocket)
+
+        // Disconnect without connecting first
+        connection.disconnect()
+
+        XCTAssertTrue(mockSocket.disconnectCalled)
+        XCTAssertFalse(connection.isConnected)
+    }
+
+    func testConnectionDisconnectWhenConnected() {
+        let mockSocket = MockSocket()
+        let settings = ConnectionSettings(boltVersion: .v5_0)
+        let connection = Connection(socket: mockSocket, settings: settings)
+
+        // Simulate connection state
+        mockSocket.queueHandshakeResponse(version: .v5_0)
+        mockSocket.queueSuccessResponse(metadata: ["server": "Neo4j/5.0.0"])
+
+        let expectation = XCTestExpectation(description: "connect")
+
+        do {
+            try connection.connect { error in
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Connection threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 5.0)
+
+        // Now disconnect
+        connection.disconnect()
+
+        XCTAssertTrue(mockSocket.disconnectCalled)
+        XCTAssertFalse(connection.isConnected)
+    }
+
+    func testMockSocketConnect() {
+        let mockSocket = MockSocket()
+
+        XCTAssertFalse(mockSocket.isConnected)
+
+        let expectation = XCTestExpectation(description: "connect")
+
+        do {
+            try mockSocket.connect(timeout: 1000) { error in
+                XCTAssertNil(error)
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Connect threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertTrue(mockSocket.connectCalled)
+        XCTAssertTrue(mockSocket.isConnected)
+    }
+
+    func testMockSocketConnectError() {
+        let mockSocket = MockSocket()
+        mockSocket.connectError = SocketError.connectionFailed("Test error")
+
+        let expectation = XCTestExpectation(description: "connect")
+
+        do {
+            try mockSocket.connect(timeout: 1000) { error in
+                XCTAssertNotNil(error)
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Connect threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertFalse(mockSocket.isConnected)
+    }
+
+    func testMockSocketSend() {
+        let mockSocket = MockSocket()
+        let testData: [Byte] = [0x01, 0x02, 0x03]
+
+        let future = mockSocket.send(bytes: testData)
+        XCTAssertNotNil(future)
+
+        // Wait for the future
+        let expectation = XCTestExpectation(description: "send")
+        future?.whenComplete { result in
+            switch result {
+            case .success:
+                break
+            case .failure(let error):
+                XCTFail("Send failed: \(error)")
+            }
+            expectation.fulfill()
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+
+        XCTAssertEqual(mockSocket.sentData.count, 1)
+        XCTAssertEqual(mockSocket.sentData.first, testData)
+    }
+
+    func testMockSocketReceive() {
+        let mockSocket = MockSocket()
+        let testResponse: [Byte] = [0x70, 0xA0]  // SUCCESS with empty map
+        mockSocket.queueResponse(testResponse)
+
+        let expectation = XCTestExpectation(description: "receive")
+
+        do {
+            let future = try mockSocket.receive(expectedNumberOfBytes: 100)
+            future?.whenComplete { result in
+                switch result {
+                case .success(let bytes):
+                    XCTAssertEqual(bytes, testResponse)
+                case .failure(let error):
+                    XCTFail("Receive failed: \(error)")
+                }
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Receive threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+    }
+
+    func testMockSocketQueueMultipleResponses() {
+        let mockSocket = MockSocket()
+        let response1: [Byte] = [0x01]
+        let response2: [Byte] = [0x02]
+        let response3: [Byte] = [0x03]
+
+        mockSocket.queueResponse(response1)
+        mockSocket.queueResponse(response2)
+        mockSocket.queueResponse(response3)
+
+        // Receive responses in order
+        for (index, expected) in [response1, response2, response3].enumerated() {
+            let expectation = XCTestExpectation(description: "receive \(index)")
+
+            do {
+                let future = try mockSocket.receive(expectedNumberOfBytes: 100)
+                future?.whenComplete { result in
+                    if case .success(let bytes) = result {
+                        XCTAssertEqual(bytes, expected, "Response \(index) mismatch")
+                    }
+                    expectation.fulfill()
+                }
+            } catch {
+                XCTFail("Receive threw: \(error)")
+            }
+
+            wait(for: [expectation], timeout: 2.0)
+        }
+    }
+
+    func testMockSocketReset() {
+        let mockSocket = MockSocket()
+
+        mockSocket.queueResponse([0x01])
+        _ = mockSocket.send(bytes: [0x02])
+
+        mockSocket.reset()
+
+        XCTAssertEqual(mockSocket.sentData.count, 0)
+        XCTAssertFalse(mockSocket.isConnected)
+        XCTAssertFalse(mockSocket.connectCalled)
+    }
+
+    func testMockSocketDisconnect() {
+        let mockSocket = MockSocket()
+
+        // Connect first
+        let connectExp = XCTestExpectation(description: "connect")
+        do {
+            try mockSocket.connect(timeout: 1000) { _ in
+                connectExp.fulfill()
+            }
+        } catch {
+            XCTFail("Connect threw: \(error)")
+        }
+        wait(for: [connectExp], timeout: 2.0)
+
+        XCTAssertTrue(mockSocket.isConnected)
+
+        // Disconnect
+        mockSocket.disconnect()
+
+        XCTAssertFalse(mockSocket.isConnected)
+        XCTAssertTrue(mockSocket.disconnectCalled)
+    }
+
+    func testMockSocketQueueSuccessResponse() {
+        let mockSocket = MockSocket()
+        mockSocket.queueSuccessResponse(metadata: ["server": "Neo4j/5.0.0"])
+
+        let expectation = XCTestExpectation(description: "receive")
+
+        do {
+            let future = try mockSocket.receive(expectedNumberOfBytes: 100)
+            future?.whenComplete { result in
+                if case .success(let bytes) = result {
+                    // Should have chunked SUCCESS response
+                    XCTAssertGreaterThan(bytes.count, 0)
+                    // Last two bytes should be 0x00 0x00 (message terminator)
+                    XCTAssertEqual(bytes.suffix(2), [0x00, 0x00])
+                }
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Receive threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+    }
+
+    func testMockSocketQueueFailureResponse() {
+        let mockSocket = MockSocket()
+        mockSocket.queueFailureResponse(
+            code: "Neo.ClientError.Security.Unauthorized",
+            message: "Authentication failed"
+        )
+
+        let expectation = XCTestExpectation(description: "receive")
+
+        do {
+            let future = try mockSocket.receive(expectedNumberOfBytes: 100)
+            future?.whenComplete { result in
+                if case .success(let bytes) = result {
+                    XCTAssertGreaterThan(bytes.count, 0)
+                    // Last two bytes should be 0x00 0x00
+                    XCTAssertEqual(bytes.suffix(2), [0x00, 0x00])
+                }
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Receive threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+    }
+
+    func testMockSocketQueueHandshakeResponse() {
+        let mockSocket = MockSocket()
+        mockSocket.queueHandshakeResponse(version: .v5_4)
+
+        let expectation = XCTestExpectation(description: "receive")
+
+        do {
+            let future = try mockSocket.receive(expectedNumberOfBytes: 4)
+            future?.whenComplete { result in
+                if case .success(let bytes) = result {
+                    XCTAssertEqual(bytes.count, 4)
+                    XCTAssertEqual(bytes[0], 4)  // minor
+                    XCTAssertEqual(bytes[3], 5)  // major
+                }
+                expectation.fulfill()
+            }
+        } catch {
+            XCTFail("Receive threw: \(error)")
+        }
+
+        wait(for: [expectation], timeout: 2.0)
+    }
+
+    func testConnectionRequestWhenNotConnected() {
+        let mockSocket = MockSocket()
+        let connection = Connection(socket: mockSocket)
+
+        // Should return nil when not connected
+        let request = Request.reset()
+        do {
+            let future = try connection.request(request)
+            XCTAssertNil(future, "Request should return nil when not connected")
+        } catch {
+            XCTFail("Request threw: \(error)")
+        }
+    }
+
+    // MARK: - BoltConnectionMetadata Tests
+
+    func testBoltConnectionMetadataFromMap() {
+        let map = Map(dictionary: [
+            "server": "Neo4j/5.4.0",
+            "connection_id": "bolt-123",
+            "hints": Map(dictionary: [
+                "connection.recv_timeout_seconds": "120"
+            ])
+        ])
+
+        let metadata = BoltConnectionMetadata(from: map)
+
+        XCTAssertEqual(metadata.serverAgent, "Neo4j/5.4.0")
+        XCTAssertEqual(metadata.connectionId, "bolt-123")
+        XCTAssertEqual(metadata.serverVersion, "5.4.0")
+        XCTAssertEqual(metadata.hints["connection.recv_timeout_seconds"], "120")
+    }
+
+    func testBoltConnectionMetadataEmpty() {
+        let map = Map(dictionary: [:])
+        let metadata = BoltConnectionMetadata(from: map)
+
+        XCTAssertEqual(metadata.serverAgent, "Unknown")
+        XCTAssertNil(metadata.connectionId)
+        XCTAssertNil(metadata.serverVersion)
+        XCTAssertTrue(metadata.hints.isEmpty)
+    }
+
+    // MARK: - SocketError Tests
+
+    func testSocketErrorConnectionFailed() {
+        let error = SocketError.connectionFailed("Test message")
+        if case .connectionFailed(let message) = error {
+            XCTAssertEqual(message, "Test message")
+        } else {
+            XCTFail("Wrong error type")
+        }
+    }
+
+    func testSocketErrorSendFailed() {
+        let error = SocketError.sendFailed("Send error")
+        if case .sendFailed(let message) = error {
+            XCTAssertEqual(message, "Send error")
+        } else {
+            XCTFail("Wrong error type")
+        }
+    }
+
+    func testSocketErrorReceiveFailed() {
+        let error = SocketError.receiveFailed("Receive error")
+        if case .receiveFailed(let message) = error {
+            XCTAssertEqual(message, "Receive error")
+        } else {
+            XCTFail("Wrong error type")
+        }
+    }
+
     // MARK: - allTests for Linux
 
     static var allTests: [(String, (ConnectionTests) -> () throws -> Void)] {
@@ -358,6 +722,26 @@ final class ConnectionTests: XCTestCase {
             ("testBoltResponseSignatures", testBoltResponseSignatures),
             ("testBoltMessageAliases", testBoltMessageAliases),
             ("testResponseCategories", testResponseCategories),
+            ("testConnectionInit", testConnectionInit),
+            ("testConnectionCapabilities", testConnectionCapabilities),
+            ("testConnectionDisconnect", testConnectionDisconnect),
+            ("testConnectionDisconnectWhenConnected", testConnectionDisconnectWhenConnected),
+            ("testMockSocketConnect", testMockSocketConnect),
+            ("testMockSocketConnectError", testMockSocketConnectError),
+            ("testMockSocketSend", testMockSocketSend),
+            ("testMockSocketReceive", testMockSocketReceive),
+            ("testMockSocketQueueMultipleResponses", testMockSocketQueueMultipleResponses),
+            ("testMockSocketReset", testMockSocketReset),
+            ("testMockSocketDisconnect", testMockSocketDisconnect),
+            ("testMockSocketQueueSuccessResponse", testMockSocketQueueSuccessResponse),
+            ("testMockSocketQueueFailureResponse", testMockSocketQueueFailureResponse),
+            ("testMockSocketQueueHandshakeResponse", testMockSocketQueueHandshakeResponse),
+            ("testConnectionRequestWhenNotConnected", testConnectionRequestWhenNotConnected),
+            ("testBoltConnectionMetadataFromMap", testBoltConnectionMetadataFromMap),
+            ("testBoltConnectionMetadataEmpty", testBoltConnectionMetadataEmpty),
+            ("testSocketErrorConnectionFailed", testSocketErrorConnectionFailed),
+            ("testSocketErrorSendFailed", testSocketErrorSendFailed),
+            ("testSocketErrorReceiveFailed", testSocketErrorReceiveFailed),
         ]
     }
 }

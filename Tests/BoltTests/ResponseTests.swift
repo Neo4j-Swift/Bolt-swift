@@ -308,6 +308,358 @@ final class ResponseTests: XCTestCase {
         XCTAssertTrue(list.items.isEmpty)
     }
 
+    // MARK: - Response Metadata Extraction Tests
+
+    func testResponseMetadataForSuccess() throws {
+        let response = Response(category: .success, items: [
+            Map(dictionary: [
+                "server": "Neo4j/5.0.0",
+                "connection_id": "conn-123",
+                "bookmark": "neo4j:bookmark:v1:tx42"
+            ])
+        ])
+
+        XCTAssertEqual(response.server, "Neo4j/5.0.0")
+        XCTAssertEqual(response.connectionId, "conn-123")
+        XCTAssertEqual(response.bookmark, "neo4j:bookmark:v1:tx42")
+    }
+
+    func testResponseMetadataForNonSuccess() throws {
+        let response = Response(category: .failure, items: [])
+        XCTAssertTrue(response.metadata.isEmpty)
+    }
+
+    func testResponseFields() throws {
+        let response = Response(category: .success, items: [
+            Map(dictionary: [
+                "fields": List(items: ["name", "age", "city"])
+            ])
+        ])
+
+        let fields = response.fields
+        XCTAssertNotNil(fields)
+        XCTAssertEqual(fields?.count, 3)
+        XCTAssertEqual(fields?[0], "name")
+        XCTAssertEqual(fields?[1], "age")
+        XCTAssertEqual(fields?[2], "city")
+    }
+
+    func testResponseHasMore() throws {
+        let responseWithMore = Response(category: .success, items: [
+            Map(dictionary: ["has_more": true])
+        ])
+        XCTAssertTrue(responseWithMore.hasMore)
+
+        let responseWithoutMore = Response(category: .success, items: [
+            Map(dictionary: ["has_more": false])
+        ])
+        XCTAssertFalse(responseWithoutMore.hasMore)
+
+        let responseNoField = Response(category: .success, items: [Map(dictionary: [:])])
+        XCTAssertFalse(responseNoField.hasMore)
+    }
+
+    func testResponseQueryId() throws {
+        let response = Response(category: .success, items: [
+            Map(dictionary: ["qid": Int64(42)])
+        ])
+
+        XCTAssertEqual(response.qid, 42)
+    }
+
+    func testResponseStats() throws {
+        let response = Response(category: .success, items: [
+            Map(dictionary: [
+                "stats": Map(dictionary: [
+                    "nodes-created": Int64(5),
+                    "relationships-created": Int64(3),
+                    "properties-set": Int64(10)
+                ])
+            ])
+        ])
+
+        let stats = response.stats
+        XCTAssertEqual(stats["nodes-created"], 5)
+        XCTAssertEqual(stats["relationships-created"], 3)
+        XCTAssertEqual(stats["properties-set"], 10)
+    }
+
+    // MARK: - Error Conversion Tests
+
+    func testAsErrorForFailure() throws {
+        let response = Response(category: .failure, items: [
+            Map(dictionary: [
+                "code": "Neo.ClientError.Statement.SyntaxError",
+                "message": "Invalid syntax near RETUR"
+            ])
+        ])
+
+        let error = response.asError()
+        XCTAssertNotNil(error)
+
+        if case let BoltError.syntax(message) = error! {
+            XCTAssertTrue(message.contains("Invalid syntax"))
+        } else {
+            XCTFail("Expected syntax error")
+        }
+    }
+
+    func testAsErrorForSuccess() throws {
+        let response = Response(category: .success, items: [])
+        XCTAssertNil(response.asError())
+    }
+
+    func testAsErrorForEmptyFailure() throws {
+        let response = Response(category: .failure, items: [])
+        XCTAssertNil(response.asError())
+    }
+
+    // MARK: - BoltError Parsing Tests
+
+    func testBoltErrorAuthentication() throws {
+        let error = BoltError.from(
+            code: "Neo.ClientError.Security.Unauthorized",
+            message: "Invalid credentials"
+        )
+
+        if case let BoltError.authentication(message) = error {
+            XCTAssertEqual(message, "Invalid credentials")
+        } else {
+            XCTFail("Expected authentication error")
+        }
+    }
+
+    func testBoltErrorSyntax() throws {
+        let error = BoltError.from(
+            code: "Neo.ClientError.Statement.SyntaxError",
+            message: "Syntax error"
+        )
+
+        if case let BoltError.syntax(message) = error {
+            XCTAssertEqual(message, "Syntax error")
+        } else {
+            XCTFail("Expected syntax error")
+        }
+    }
+
+    func testBoltErrorConstraint() throws {
+        let error = BoltError.from(
+            code: "Neo.ClientError.Schema.ConstraintValidationFailed",
+            message: "Constraint violated"
+        )
+
+        if case let BoltError.constraint(message) = error {
+            XCTAssertEqual(message, "Constraint violated")
+        } else {
+            XCTFail("Expected constraint error")
+        }
+    }
+
+    func testBoltErrorTransaction() throws {
+        let error = BoltError.from(
+            code: "Neo.ClientError.Transaction.TransactionTerminated",
+            message: "Transaction terminated"
+        )
+
+        if case let BoltError.transaction(message) = error {
+            XCTAssertEqual(message, "Transaction terminated")
+        } else {
+            XCTFail("Expected transaction error")
+        }
+    }
+
+    func testBoltErrorTransient() throws {
+        let error = BoltError.from(
+            code: "Neo.TransientError.General.DatabaseUnavailable",
+            message: "Database unavailable"
+        )
+
+        if case let BoltError.transient(message) = error {
+            XCTAssertEqual(message, "Database unavailable")
+        } else {
+            XCTFail("Expected transient error")
+        }
+    }
+
+    func testBoltErrorUnknown() throws {
+        let error = BoltError.from(
+            code: "Custom.Error.Code",
+            message: "Unknown error"
+        )
+
+        if case let BoltError.unknown(code, message) = error {
+            XCTAssertEqual(code, "Custom.Error.Code")
+            XCTAssertEqual(message, "Unknown error")
+        } else {
+            XCTFail("Expected unknown error")
+        }
+    }
+
+    func testBoltErrorLocalizedDescription() throws {
+        let errors: [BoltError] = [
+            .connection(message: "conn"),
+            .authentication(message: "auth"),
+            .protocol(message: "proto"),
+            .transaction(message: "tx"),
+            .database(message: "db"),
+            .constraint(message: "const"),
+            .syntax(message: "syn"),
+            .security(message: "sec"),
+            .transient(message: "trans"),
+            .service(message: "svc"),
+            .unknown(code: "code", message: "msg")
+        ]
+
+        for error in errors {
+            XCTAssertNotNil(error.errorDescription)
+            XCTAssertFalse(error.errorDescription!.isEmpty)
+        }
+    }
+
+    // MARK: - Chunking Tests
+
+    func testUnchunkSimpleMessage() throws {
+        // Simple chunked message: 2-byte length + message + 0x00 0x00
+        let message: [Byte] = [0xb1, 0x70, 0xa0]  // SUCCESS with empty map
+        let length = UInt16(message.count)
+        let chunked: [Byte] = [Byte(length >> 8), Byte(length & 0xFF)] + message + [0x00, 0x00]
+
+        let unchunked = try Response.unchunk(chunked)
+        XCTAssertEqual(unchunked.count, 1)
+        XCTAssertEqual(unchunked[0], message)
+    }
+
+    func testUnchunkEmptyBytes() throws {
+        do {
+            _ = try Response.unchunk([])
+            // Empty may return empty or throw
+        } catch {
+            // Expected for some implementations
+        }
+    }
+
+    func testUnchunkTooFewBytes() throws {
+        do {
+            _ = try Response.unchunk([0x00])
+            XCTFail("Should throw for single byte")
+        } catch {
+            // Expected
+        }
+    }
+
+    // MARK: - Unpack Error Tests
+
+    func testUnpackEmptyBytes() throws {
+        do {
+            _ = try Response.unpack([])
+            XCTFail("Should throw for empty bytes")
+        } catch let error as BoltError {
+            if case .protocol(let message) = error {
+                XCTAssertTrue(message.contains("Empty"))
+            } else {
+                XCTFail("Expected protocol error")
+            }
+        }
+    }
+
+    func testUnpackInvalidMarker() throws {
+        // 0xFF is not a valid structure marker
+        do {
+            _ = try Response.unpack([0xFF])
+            XCTFail("Should throw for invalid marker")
+        } catch {
+            // Expected
+        }
+    }
+
+    // MARK: - BoltNotification Tests
+
+    func testNotificationParsing() throws {
+        let notificationMap = Map(dictionary: [
+            "code": "Neo.ClientNotification.Statement.UnknownPropertyKeyWarning",
+            "title": "Unknown property",
+            "description": "The property 'foo' does not exist",
+            "severity": "WARNING",
+            "category": "HINT",
+            "position": Map(dictionary: [
+                "offset": Int64(10),
+                "line": Int64(1),
+                "column": Int64(11)
+            ])
+        ])
+
+        let notification = BoltNotification(from: notificationMap)
+        XCTAssertNotNil(notification)
+        XCTAssertEqual(notification?.code, "Neo.ClientNotification.Statement.UnknownPropertyKeyWarning")
+        XCTAssertEqual(notification?.title, "Unknown property")
+        XCTAssertEqual(notification?.severity, "WARNING")
+        XCTAssertEqual(notification?.category, "HINT")
+        XCTAssertEqual(notification?.position?.offset, 10)
+        XCTAssertEqual(notification?.position?.line, 1)
+        XCTAssertEqual(notification?.position?.column, 11)
+    }
+
+    func testNotificationWithoutPosition() throws {
+        let notificationMap = Map(dictionary: [
+            "code": "Neo.ClientNotification.Statement.Warning",
+            "title": "Warning",
+            "description": "Some warning",
+            "severity": "WARNING"
+        ])
+
+        let notification = BoltNotification(from: notificationMap)
+        XCTAssertNotNil(notification)
+        XCTAssertNil(notification?.position)
+        XCTAssertNil(notification?.category)
+    }
+
+    func testNotificationFromInvalidMap() throws {
+        let invalidMap = Map(dictionary: ["foo": "bar"])
+        let notification = BoltNotification(from: invalidMap)
+        XCTAssertNil(notification)
+    }
+
+    func testNotificationFromNonMap() throws {
+        let notification = BoltNotification(from: "not a map")
+        XCTAssertNil(notification)
+    }
+
+    func testResponseNotifications() throws {
+        let response = Response(category: .success, items: [
+            Map(dictionary: [
+                "notifications": List(items: [
+                    Map(dictionary: [
+                        "code": "Neo.ClientNotification.Test",
+                        "title": "Test",
+                        "description": "Test notification",
+                        "severity": "WARNING"
+                    ])
+                ])
+            ])
+        ])
+
+        let notifications = response.notifications
+        XCTAssertEqual(notifications.count, 1)
+        XCTAssertEqual(notifications[0].code, "Neo.ClientNotification.Test")
+    }
+
+    // MARK: - Response Initialization Tests
+
+    func testResponseDefaultInit() throws {
+        let response = Response()
+        XCTAssertEqual(response.category, .empty)
+        XCTAssertTrue(response.items.isEmpty)
+    }
+
+    func testResponseWithItems() throws {
+        let response = Response(category: .record, items: [
+            List(items: [Int64(1), Int64(2), Int64(3)])
+        ])
+
+        XCTAssertEqual(response.category, .record)
+        XCTAssertEqual(response.items.count, 1)
+    }
+
     // MARK: - allTests for Linux
 
     static var allTests: [(String, (ResponseTests) -> () throws -> Void)] {
