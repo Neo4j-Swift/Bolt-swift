@@ -109,58 +109,51 @@ public class EncryptedSocket: UnencryptedSocket {
 // MARK: - NIOTSConnectionBootstrap TLS Extension
 
 #if !os(Linux)
+
+/// Dispatch queue used for TLS certificate verification (following Hummingbird pattern)
+private let tlsDispatchQueue = DispatchQueue(label: "bolt.tls.verify")
+
 extension NIOTSConnectionBootstrap {
     func tlsConfig(validator: CertificateValidatorProtocol) -> NIOTSConnectionBootstrap {
         let options = NWProtocolTLS.Options()
-        let verifyQueue = DispatchQueue(label: "bolt.tls.verify")
 
-        let verifyBlock: sec_protocol_verify_t = { metadata, trust, verifyCompleteCB in
-            let actualTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+        // Set SNI (Server Name Indication) for the hostname
+        // This is required for cloud services like Neo4j Aura
+        sec_protocol_options_set_tls_server_name(options.securityProtocolOptions, validator.hostname)
 
-            if !validator.trustedCertificates.isEmpty {
-                SecTrustSetAnchorCertificates(actualTrust, validator.trustedCertificates as CFArray)
-            }
+        // Only set up a custom verification block if we have custom trusted certificates
+        // Following Hummingbird's pattern: for standard system CAs, don't override verification
+        if !validator.trustedCertificates.isEmpty {
+            sec_protocol_options_set_verify_block(
+                options.securityProtocolOptions,
+                { _, sec_trust, sec_protocol_verify_complete in
+                    let trust = sec_trust_copy_ref(sec_trust).takeRetainedValue()
+                    SecTrustSetAnchorCertificates(trust, validator.trustedCertificates as CFArray)
 
-            SecTrustSetPolicies(actualTrust, SecPolicyCreateSSL(true, nil))
-
-            SecTrustEvaluateAsync(actualTrust, verifyQueue) { trust, result in
-                var optionalSha1: String?
-                let count = SecTrustGetCertificateCount(trust)
-
-                if count >= 1 {
-                    for index in 0..<count {
-                        if let cert = SecTrustGetCertificateAtIndex(trust, index) {
-                            let certData = SecCertificateCopyData(cert) as Data
-                            optionalSha1 = certData.sha1()
-                            break
+                    SecTrustEvaluateAsyncWithError(trust, tlsDispatchQueue) { _, result, error in
+                        if let error = error {
+                            #if BOLT_DEBUG
+                            print("TLS trust evaluation failed: \(error.localizedDescription)")
+                            #endif
                         }
-                    }
-                } else {
-                    verifyCompleteCB(false)
-                    return
-                }
 
-                guard let sha1 = optionalSha1, !sha1.isEmpty else {
-                    verifyCompleteCB(false)
-                    return
-                }
+                        // Get certificate SHA1 for validator callback
+                        if let certChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                           let firstCert = certChain.first {
+                            let certData = SecCertificateCopyData(firstCert) as Data
+                            let sha1 = certData.sha1()
 
-                switch result {
-                case .proceed, .unspecified:
-                    validator.didTrustCertificate(withSHA1: sha1)
-                    verifyCompleteCB(true)
-                default:
-                    if !validator.shouldTrustCertificate(withSHA1: sha1) {
-                        verifyCompleteCB(false)
-                    } else {
-                        validator.didTrustCertificate(withSHA1: sha1)
-                        verifyCompleteCB(true)
+                            if result {
+                                validator.didTrustCertificate(withSHA1: sha1)
+                            }
+                        }
+                        sec_protocol_verify_complete(result)
                     }
-                }
-            }
+                },
+                tlsDispatchQueue
+            )
         }
 
-        sec_protocol_options_set_verify_block(options.securityProtocolOptions, verifyBlock, verifyQueue)
         return self.tlsOptions(options)
     }
 
