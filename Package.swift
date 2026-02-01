@@ -27,7 +27,7 @@ let package = Package(
         .target(
             name: "Bolt",
             dependencies: [
-                "PackStream",
+                .product(name: "PackStream", package: "PackStream-Swift"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
