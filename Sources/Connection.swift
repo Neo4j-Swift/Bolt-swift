@@ -15,23 +15,43 @@ public final class Connection: @unchecked Sendable {
     private let socket: SocketProtocol
 
     /// Current transaction bookmark
-    public var currentTransactionBookmark: String?
+    private var _currentTransactionBookmark: String?
+    public var currentTransactionBookmark: String? {
+        get { lock.withLock { _currentTransactionBookmark } }
+        set { lock.withLock { _currentTransactionBookmark = newValue } }
+    }
 
     /// Whether the connection is currently active
-    public private(set) var isConnected = false
+    private var _isConnected = false
+    public private(set) var isConnected: Bool {
+        get { lock.withLock { _isConnected } }
+        set { lock.withLock { _isConnected = newValue } }
+    }
 
     /// Negotiated Bolt protocol version
-    public private(set) var negotiatedVersion: BoltVersion = .zero
+    private var _negotiatedVersion: BoltVersion = .zero
+    public private(set) var negotiatedVersion: BoltVersion {
+        get { lock.withLock { _negotiatedVersion } }
+        set { lock.withLock { _negotiatedVersion = newValue } }
+    }
 
     /// Server metadata from HELLO response
-    public private(set) var serverMetadata: BoltConnectionMetadata?
+    private var _serverMetadata: BoltConnectionMetadata?
+    public private(set) var serverMetadata: BoltConnectionMetadata? {
+        get { lock.withLock { _serverMetadata } }
+        set { lock.withLock { _serverMetadata = newValue } }
+    }
 
     /// Capabilities based on negotiated protocol version
     public var capabilities: BoltCapabilities {
         BoltCapabilities.forVersion(negotiatedVersion)
     }
 
-    private var currentEventLoop: EventLoop?
+    private var _currentEventLoop: EventLoop?
+    private var currentEventLoop: EventLoop? {
+        get { lock.withLock { _currentEventLoop } }
+        set { lock.withLock { _currentEventLoop = newValue } }
+    }
     private let lock = NSLock()
 
     public init(socket: SocketProtocol, settings: ConnectionSettings = ConnectionSettings()) {
