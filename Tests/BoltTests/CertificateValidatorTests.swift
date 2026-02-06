@@ -6,7 +6,7 @@ import XCTest
 import Security
 #endif
 
-class CertificateValidatorTests: XCTestCase {
+class CertificateValidatorTests: XCTestCase, @unchecked Sendable {
 
     // MARK: - UnsecureCertificateValidator Tests
 

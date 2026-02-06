@@ -9,7 +9,7 @@ import Dispatch
 
 @testable import Bolt
 
-final class BoltTests: XCTestCase {
+final class BoltTests: XCTestCase, @unchecked Sendable {
 
     var eventLoopGroup: MultiThreadedEventLoopGroup! = nil
 

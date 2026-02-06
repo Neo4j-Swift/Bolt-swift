@@ -94,12 +94,16 @@ public class EncryptedSocket: UnencryptedSocket {
 
     #else
     override func setupBootstrap(_ group: MultiThreadedEventLoopGroup, _ dataHandler: ReadDataHandler) -> Bootstrap {
-        let tsGroup = NIOTSEventLoopGroup()
+        let tsGroup = NIOTSEventLoopGroup(loopCount: 1, defaultQoS: .utility)
+
+        #if BOLT_DEBUG
+        print("EncryptedSocket: Setting up TLS bootstrap for \(self.hostname):\(self.port)")
+        print("EncryptedSocket: Trusted certificates count: \(self.certificateValidator.trustedCertificates.count)")
+        #endif
 
         return NIOTSConnectionBootstrap(group: tsGroup)
-            .channelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
             .channelInitializer { channel in
-                channel.pipeline.addHandler(dataHandler)
+                channel.pipeline.addHandlers([dataHandler], position: .last)
             }
             .tlsConfig(validator: self.certificateValidator)
     }
@@ -121,20 +125,38 @@ extension NIOTSConnectionBootstrap {
         // This is required for cloud services like Neo4j Aura
         sec_protocol_options_set_tls_server_name(options.securityProtocolOptions, validator.hostname)
 
+        #if BOLT_DEBUG
+        print("tlsConfig: hostname=\(validator.hostname), trustedCertificates.count=\(validator.trustedCertificates.count)")
+        #endif
+
         // Only set up a custom verification block if we have custom trusted certificates
         // Following Hummingbird's pattern: for standard system CAs, don't override verification
         if !validator.trustedCertificates.isEmpty {
+            #if BOLT_DEBUG
+            print("tlsConfig: Setting up custom verification block for self-signed certificate")
+            #endif
+
             sec_protocol_options_set_verify_block(
                 options.securityProtocolOptions,
                 { _, sec_trust, sec_protocol_verify_complete in
+                    #if BOLT_DEBUG
+                    print("tlsConfig: Verification block called")
+                    #endif
+
                     let trust = sec_trust_copy_ref(sec_trust).takeRetainedValue()
+
+                    // Set the custom certificates as anchors
                     SecTrustSetAnchorCertificates(trust, validator.trustedCertificates as CFArray)
+                    // For self-signed certificates, we need to trust ONLY our anchors (not system CAs)
+                    SecTrustSetAnchorCertificatesOnly(trust, true)
 
                     SecTrustEvaluateAsyncWithError(trust, tlsDispatchQueue) { _, result, error in
+                        #if BOLT_DEBUG
+                        print("tlsConfig: SecTrustEvaluateAsyncWithError result=\(result), error=\(String(describing: error))")
+                        #endif
+
                         if let error = error {
-                            #if BOLT_DEBUG
                             print("TLS trust evaluation failed: \(error.localizedDescription)")
-                            #endif
                         }
 
                         // Get certificate SHA1 for validator callback
@@ -142,6 +164,10 @@ extension NIOTSConnectionBootstrap {
                            let firstCert = certChain.first {
                             let certData = SecCertificateCopyData(firstCert) as Data
                             let sha1 = certData.sha1()
+
+                            #if BOLT_DEBUG
+                            print("tlsConfig: Certificate SHA1: \(sha1)")
+                            #endif
 
                             if result {
                                 validator.didTrustCertificate(withSHA1: sha1)
@@ -152,6 +178,10 @@ extension NIOTSConnectionBootstrap {
                 },
                 tlsDispatchQueue
             )
+        } else {
+            #if BOLT_DEBUG
+            print("tlsConfig: No trusted certificates, using default verification")
+            #endif
         }
 
         return self.tlsOptions(options)

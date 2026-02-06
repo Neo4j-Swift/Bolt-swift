@@ -20,37 +20,82 @@ For each local Neo4j version, test both:
 - TLS-encrypted connections (with self-signed certificates)
 
 ### Docker Test Environment
-Neo4j containers are on the `neo4j_default` network:
-- neo4j-3.5: 172.18.0.2:7687 (macOS: localhost:7687)
-- neo4j-4.4: 172.18.0.3:7687 (macOS: localhost:7688)
-- neo4j-5.26: 172.18.0.4:7687 (macOS: localhost:7689)
-- neo4j-2025: 172.18.0.5:7687 (macOS: localhost:7690)
 
-Swift container is on the same network for Linux testing.
+**Neo4j Containers:**
+- graphgopher-neo4j: Unencrypted (macOS: localhost:7687, Docker: graphgopher-neo4j:7687)
+- neo4j-tls: TLS-enabled (macOS: localhost:7691, Docker: neo4j-tls:7687)
+
+**Swift Linux Container:**
+```bash
+# Create Swift container on the same network as Neo4j
+docker run -d --name swift-linux \
+  --network neo4j-tls-docker_default \
+  -v /path/to/Neo4j:/workspace/Neo4j \
+  swift:6.0 tail -f /dev/null
+
+# Connect to Neo4j network if needed
+docker network connect neo4j-tls-docker_default graphgopher-neo4j
+```
 
 ### Running Tests
 
 **Linux (Docker):**
 ```bash
-docker exec -w /workspace/Neo4j/Bolt-swift swift swift test --enable-test-discovery --filter "AsyncSocketTests"
+# Run all unit tests (skip legacy sync socket tests)
+docker exec -w /workspace/Neo4j/Bolt-swift \
+  -e NEO4J_HOSTNAME=graphgopher-neo4j \
+  -e NEO4J_PASSWORD=j4neo \
+  swift-linux swift test --enable-test-discovery \
+  --skip "UnencryptedSocketTests" --skip "EncryptedSocketTests"
+
+# Run async integration tests only
+docker exec -w /workspace/Neo4j/Bolt-swift \
+  -e NEO4J_HOSTNAME=graphgopher-neo4j \
+  -e NEO4J_PASSWORD=j4neo \
+  swift-linux swift test --enable-test-discovery --filter "AsyncSocketTests"
 ```
 
 **macOS:**
 ```bash
+# Run all tests
+swift test
+
+# Run async integration tests
 swift test --filter "AsyncSocketTests"
+
+# Run TLS tests (requires neo4j-tls container)
+swift test --filter "EncryptedSocketTests"
 ```
 
 ### Test Configuration
-Edit `Tests/BoltTests/BoltSwiftTestConfig.json` to point to the target Neo4j instance:
+
+Tests support environment variable overrides:
+- `NEO4J_HOSTNAME`: Override hostname (required for Docker)
+- `NEO4J_PORT`: Override port
+- `NEO4J_USERNAME`: Override username
+- `NEO4J_PASSWORD`: Override password
+
+Or edit `Tests/BoltTests/BoltSwiftTestConfig.json`:
 ```json
 {
     "username": "neo4j",
     "password": "j4neo",
-    "hostname": "172.18.0.3",  // or "localhost" for macOS
+    "hostname": "localhost",
     "port": 7687,
     "hostUsesSelfSignedCertificate": false
 }
 ```
+
+### TLS Testing (macOS only)
+
+TLS tests use Network.framework on macOS. The neo4j-tls Docker container provides a TLS-enabled Neo4j on port 7691.
+
+Certificate setup is in `/path/to/neo4j-tls-docker/certificates/`:
+- `public.crt`: PEM certificate
+- `public.der`: DER certificate for macOS Security framework
+- `private.key`: Private key
+
+The certificate must have `extendedKeyUsage = serverAuth` for macOS to accept it.
 
 ## Bolt Protocol Versions
 
@@ -87,12 +132,16 @@ Handshake proposes versions with ranges for better negotiation.
 # Build
 swift build
 
-# Test all
+# Test all (macOS)
 swift test
 
 # Test specific suite
 swift test --filter "AsyncSocketTests"
 
-# Linux test with discovery
-docker exec -w /workspace/Neo4j/Bolt-swift swift swift test --enable-test-discovery
+# Linux: Run all tests
+docker exec -w /workspace/Neo4j/Bolt-swift \
+  -e NEO4J_HOSTNAME=graphgopher-neo4j \
+  -e NEO4J_PASSWORD=j4neo \
+  swift-linux swift test --enable-test-discovery \
+  --skip "UnencryptedSocketTests" --skip "EncryptedSocketTests"
 ```

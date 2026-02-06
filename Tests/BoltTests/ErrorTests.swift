@@ -10,7 +10,7 @@ import Dispatch
 
 /// Error handling and classification tests
 /// Based on patterns from neo4j-go-driver (error_test.go) and neo4j-java-driver (ErrorIT.java)
-final class ErrorTests: XCTestCase {
+final class ErrorTests: XCTestCase, @unchecked Sendable {
 
     // MARK: - BoltError Type Tests
 

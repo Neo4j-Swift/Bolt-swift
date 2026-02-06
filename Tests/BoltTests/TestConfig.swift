@@ -11,26 +11,30 @@ struct TestConfig {
     let sslConfig: SSLConfiguration
 
     init(pathToFile: String) {
+        // Environment variables take precedence over config file
+        let envHostname = ProcessInfo.processInfo.environment["NEO4J_HOSTNAME"]
+        let envPort = ProcessInfo.processInfo.environment["NEO4J_PORT"].flatMap { Int($0) }
+        let envUsername = ProcessInfo.processInfo.environment["NEO4J_USERNAME"]
+        let envPassword = ProcessInfo.processInfo.environment["NEO4J_PASSWORD"]
 
         do {
             let filePathURL = URL(fileURLWithPath: pathToFile)
             let jsonData = try Data(contentsOf: filePathURL)
             let jsonConfig = try JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any]
 
-            self.username = jsonConfig?["username"] as? String ?? "neo4j"
-            self.password = jsonConfig?["password"] as? String ?? "neo4j"
-            self.hostname = jsonConfig?["hostname"] as? String ?? "localhost"
-            self.port     = jsonConfig?["port"] as? Int ?? 7687
+            self.username = envUsername ?? jsonConfig?["username"] as? String ?? "neo4j"
+            self.password = envPassword ?? jsonConfig?["password"] as? String ?? "neo4j"
+            self.hostname = envHostname ?? jsonConfig?["hostname"] as? String ?? "localhost"
+            self.port     = envPort ?? jsonConfig?["port"] as? Int ?? 7687
             self.hostUsesSelfSignedCertificate = jsonConfig?["hostUsesSelfSignedCertificate"] as? Bool ?? true
             self.temporarySSLKeyPath = jsonConfig?["temporarySSLKeyPath"] as? String ?? "/tmp/boltTestKeys"
             self.sslConfig = SSLConfiguration(json: jsonConfig?["certificateProperties"] as? [String: Any] ?? [:])
 
         } catch {
-
-            self.username = "neo4j"
-            self.password = "neo4j"
-            self.hostname = "localhost"
-            self.port     = 7687
+            self.username = envUsername ?? "neo4j"
+            self.password = envPassword ?? "neo4j"
+            self.hostname = envHostname ?? "localhost"
+            self.port     = envPort ?? 7687
             self.hostUsesSelfSignedCertificate = true
             self.temporarySSLKeyPath = "/tmp/boltTestKeys"
             self.sslConfig = SSLConfiguration(json: [:])

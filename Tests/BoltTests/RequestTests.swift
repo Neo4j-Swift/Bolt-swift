@@ -10,7 +10,7 @@ import Dispatch
 
 /// Request message construction tests
 /// Based on patterns from neo4j-java-driver and neo4j-go-driver
-final class RequestTests: XCTestCase {
+final class RequestTests: XCTestCase, @unchecked Sendable {
 
     // MARK: - RUN Message Tests
 

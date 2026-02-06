@@ -11,7 +11,7 @@ import Dispatch
 
 /// Connection and protocol tests
 /// Based on patterns from neo4j-go-driver and neo4j-java-driver
-final class ConnectionTests: XCTestCase {
+final class ConnectionTests: XCTestCase, @unchecked Sendable {
 
     // MARK: - Connection Settings Tests
 

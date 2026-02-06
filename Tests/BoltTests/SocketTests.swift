@@ -329,7 +329,7 @@ extension SocketTests {
 // MARK: - Async Integration Test Class
 
 /// Async integration tests using the new async/await API
-class AsyncSocketTests: XCTestCase {
+class AsyncSocketTests: XCTestCase, @unchecked Sendable {
     var socketTests: SocketTests?
 
     override func setUp() {

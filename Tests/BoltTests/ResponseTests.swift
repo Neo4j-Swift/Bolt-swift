@@ -10,7 +10,7 @@ import Dispatch
 
 /// Response parsing and handling tests
 /// Based on patterns from neo4j-java-driver and neo4j-go-driver
-final class ResponseTests: XCTestCase {
+final class ResponseTests: XCTestCase, @unchecked Sendable {
 
     // MARK: - Response Category Tests
 
