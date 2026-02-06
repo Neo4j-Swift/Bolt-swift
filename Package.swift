@@ -17,7 +17,7 @@ let package = Package(
     ],
 
     dependencies: [
-        .package(path: "../PackStream-Swift"),
+        .package(url: "https://github.com/Neo4j-Swift/PackStream-Swift.git", exact: "6.0.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
         .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.20.0"),
